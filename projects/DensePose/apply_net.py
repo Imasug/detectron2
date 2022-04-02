@@ -9,6 +9,8 @@ import pickle
 import sys
 from typing import Any, ClassVar, Dict, List
 import torch
+from PIL import Image
+import numpy as np
 
 from detectron2.config import CfgNode, get_cfg
 from detectron2.data.detection_utils import read_image
@@ -108,7 +110,7 @@ class InferenceAction(Action):
 
     @classmethod
     def setup_config(
-        cls: type, config_fpath: str, model_fpath: str, args: argparse.Namespace, opts: List[str]
+            cls: type, config_fpath: str, model_fpath: str, args: argparse.Namespace, opts: List[str]
     ):
         cfg = get_cfg()
         add_densepose_config(cfg)
@@ -161,7 +163,7 @@ class DumpAction(InferenceAction):
 
     @classmethod
     def execute_on_outputs(
-        cls: type, context: Dict[str, Any], entry: Dict[str, Any], outputs: Instances
+            cls: type, context: Dict[str, Any], entry: Dict[str, Any], outputs: Instances
     ):
         image_fpath = entry["file_name"]
         logger.info(f"Processing {image_fpath}")
@@ -225,7 +227,7 @@ class ShowAction(InferenceAction):
             "visualizations",
             metavar="<visualizations>",
             help="Comma separated list of visualizations, possible values: "
-            "[{}]".format(",".join(sorted(cls.VISUALIZERS.keys()))),
+                 "[{}]".format(",".join(sorted(cls.VISUALIZERS.keys()))),
         )
         parser.add_argument(
             "--min_score",
@@ -258,7 +260,7 @@ class ShowAction(InferenceAction):
 
     @classmethod
     def setup_config(
-        cls: type, config_fpath: str, model_fpath: str, args: argparse.Namespace, opts: List[str]
+            cls: type, config_fpath: str, model_fpath: str, args: argparse.Namespace, opts: List[str]
     ):
         opts.append("MODEL.ROI_HEADS.SCORE_THRESH_TEST")
         opts.append(str(args.min_score))
@@ -270,7 +272,7 @@ class ShowAction(InferenceAction):
 
     @classmethod
     def execute_on_outputs(
-        cls: type, context: Dict[str, Any], entry: Dict[str, Any], outputs: Instances
+            cls: type, context: Dict[str, Any], entry: Dict[str, Any], outputs: Instances
     ):
         import cv2
         import numpy as np
@@ -326,6 +328,79 @@ class ShowAction(InferenceAction):
             "entry_idx": 0,
         }
         return context
+
+
+@register_action
+class SimpleAction(InferenceAction):
+    """
+    Simple action
+    """
+
+    COMMAND: ClassVar[str] = "simple"
+
+    @classmethod
+    def add_parser(cls: type, subparsers: argparse._SubParsersAction):
+        parser = subparsers.add_parser(cls.COMMAND, help="")
+        cls.add_arguments(parser)
+        parser.set_defaults(func=cls.execute)
+
+    @classmethod
+    def add_arguments(cls: type, parser: argparse.ArgumentParser):
+        super(SimpleAction, cls).add_arguments(parser)
+        parser.add_argument(
+            "--output",
+            metavar="",
+            default="results.pkl",
+            help="",
+        )
+
+    @classmethod
+    def execute_on_outputs(
+            cls: type, context: Dict[str, Any], entry: Dict[str, Any], outputs: Instances
+    ):
+        file_name = os.path.basename(entry["file_name"])
+        logger.info(f"Processing {file_name}")
+
+        pred_boxes_XYXY = outputs.get("pred_boxes").tensor.cpu()[0]
+
+        if isinstance(outputs.pred_densepose, DensePoseChartPredictorOutput):
+            extractor = DensePoseResultExtractor()
+        elif isinstance(outputs.pred_densepose, DensePoseEmbeddingPredictorOutput):
+            extractor = DensePoseOutputsExtractor()
+        pred_densepose = extractor(outputs)[0][0]
+
+        left, top, _, _ = pred_boxes_XYXY.int()
+
+        labels = pred_densepose.labels
+        uv = pred_densepose.uv
+
+        result = [
+            labels,
+            uv[0] * 255,
+            uv[1] * 255,
+            ]
+
+        result = [np.uint8(x.cpu().numpy()[:, :, np.newaxis]) for x in result]
+        result = np.concatenate(result, -1)
+        result = Image.fromarray(result)
+
+        y, x = outputs.image_size
+
+        base = Image.new('RGB', (x, y))
+        base.paste(result, (left, top))
+        base.save(os.path.join(context["out_dir"], file_name))
+
+    @classmethod
+    def create_context(cls: type, args: argparse.Namespace, cfg: CfgNode):
+        out_dir = args.output
+        if len(out_dir) > 0 and not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+        context = {"out_dir": out_dir}
+        return context
+
+    @classmethod
+    def postexecute(cls: type, context: Dict[str, Any]):
+        pass
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
